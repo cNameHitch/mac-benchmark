@@ -7,3 +7,12 @@ edition = "2024"
 ratatui = "0.30"
 crossterm = "0.29"
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer",
+    "MTLComputeCommandEncoder", "MTLComputePipeline",
+    "MTLLibrary", "MTLBuffer", "MTLResource", "MTLTypes",
+] }

@@ -5,6 +5,8 @@ mod helpers;
 mod tests;
 mod bench;
 mod cpu_bench;
+#[cfg(target_os = "macos")]
+mod gpu_bench;
 mod sysinfo;
 mod dashboard;
 
@@ -53,7 +55,8 @@ fn parse_config() -> (Option<InternalMode>, usize, Option<u64>, Option<u32>) {
         eprintln!("  --bench            Run memory performance benchmarks");
         eprintln!("  --cpu              Run CPU benchmarks + cache hierarchy profiling");
         eprintln!("  --mt-cpu           Run multi-threaded CPU benchmarks (all cores)");
-        eprintln!("  --all              Run tests + memory benchmarks + CPU benchmarks");
+        eprintln!("  --gpu              Run GPU benchmarks (Metal compute)");
+        eprintln!("  --all              Run tests + memory benchmarks + CPU + GPU benchmarks");
         eprintln!("  --stress           Continuous correctness stress test");
         eprintln!("  --full-stress      Full stress: correctness + all benchmarks each cycle");
         eprintln!("  --dashboard        Alias for --full-stress (interactive TUI)");
@@ -76,6 +79,7 @@ fn parse_config() -> (Option<InternalMode>, usize, Option<u64>, Option<u32>) {
             "--bench" | "-b" => mode = Some(InternalMode::Run(RunMode::Bench)),
             "--cpu" => mode = Some(InternalMode::Run(RunMode::Cpu)),
             "--mt-cpu" => mode = Some(InternalMode::Run(RunMode::MtCpu)),
+            "--gpu" => mode = Some(InternalMode::Run(RunMode::Gpu)),
             "--all" | "-a" => mode = Some(InternalMode::Run(RunMode::All)),
             "--stress" | "-s" => mode = Some(InternalMode::Run(RunMode::Stress)),
             "--full-stress" | "-F" | "--dashboard" => mode = Some(InternalMode::Run(RunMode::FullStress)),

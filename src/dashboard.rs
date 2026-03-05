@@ -13,6 +13,8 @@ use ratatui::widgets::*;
 
 use crate::bench::*;
 use crate::cpu_bench;
+#[cfg(target_os = "macos")]
+use crate::gpu_bench;
 use crate::helpers::{format_duration, install_signal_handler, RUNNING};
 use crate::sysinfo;
 use crate::tests::run_test_pass;
@@ -27,17 +29,19 @@ pub enum RunMode {
     Bench,
     Cpu,
     MtCpu,
+    Gpu,
     All,
     Stress,
     FullStress,
 }
 
 impl RunMode {
-    const ALL_MODES: [RunMode; 7] = [
+    const ALL_MODES: [RunMode; 8] = [
         RunMode::Test,
         RunMode::Bench,
         RunMode::Cpu,
         RunMode::MtCpu,
+        RunMode::Gpu,
         RunMode::All,
         RunMode::Stress,
         RunMode::FullStress,
@@ -49,6 +53,7 @@ impl RunMode {
             RunMode::Bench => "Bench",
             RunMode::Cpu => "CPU",
             RunMode::MtCpu => "MT CPU",
+            RunMode::Gpu => "GPU",
             RunMode::All => "All",
             RunMode::Stress => "Stress",
             RunMode::FullStress => "Full Stress",
@@ -61,7 +66,8 @@ impl RunMode {
             RunMode::Bench => "Continuous memory bandwidth & latency benchmarks",
             RunMode::Cpu => "Continuous CPU throughput + cache hierarchy profiling",
             RunMode::MtCpu => "Multi-threaded CPU benchmark (saturates all cores)",
-            RunMode::All => "Continuous tests + memory benchmarks + CPU benchmarks",
+            RunMode::Gpu => "GPU compute throughput, memory bandwidth, and matrix multiply (Metal)",
+            RunMode::All => "Continuous tests + memory + CPU + GPU benchmarks",
             RunMode::Stress => "Continuous correctness stress test",
             RunMode::FullStress => "Full stress: tests + all benchmarks every cycle",
         }
@@ -162,6 +168,7 @@ enum WorkerMsg {
         duration: Duration,
     },
     StressTestProgress(String),
+    GpuStatus(String),
     Done,
 }
 
@@ -189,6 +196,13 @@ enum BenchMetric {
     EcoreFp(f64),
     MtSeqRead(f64),
     LoadedLatency(f64),
+    GpuFp32(f64),
+    GpuFp16(f64),
+    GpuInt32(f64),
+    GpuBufRead(f64),
+    GpuBufWrite(f64),
+    GpuBufAlloc(f64),
+    GpuMatmul(f64),
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +282,13 @@ struct FullStressStats {
     loaded_latency: MetricStats,
     cache_latencies: Vec<(String, MetricStats)>,
     cache_bandwidths: Vec<(String, MetricStats)>,
+    gpu_fp32: MetricStats,
+    gpu_fp16: MetricStats,
+    gpu_int32: MetricStats,
+    gpu_buf_read: MetricStats,
+    gpu_buf_write: MetricStats,
+    gpu_buf_alloc: MetricStats,
+    gpu_matmul: MetricStats,
     total_passed: u64,
     total_failed: u64,
 }
@@ -316,6 +337,13 @@ impl FullStressStats {
             loaded_latency: MetricStats::new(false),
             cache_latencies,
             cache_bandwidths,
+            gpu_fp32: MetricStats::new(true),
+            gpu_fp16: MetricStats::new(true),
+            gpu_int32: MetricStats::new(true),
+            gpu_buf_read: MetricStats::new(true),
+            gpu_buf_write: MetricStats::new(true),
+            gpu_buf_alloc: MetricStats::new(false), // lower is better
+            gpu_matmul: MetricStats::new(true),
             total_passed: 0,
             total_failed: 0,
         }
@@ -363,6 +391,16 @@ struct DashboardState {
     cache_latencies: Vec<(String, f64)>,
     cache_bandwidths: Vec<(String, f64)>,
 
+    // GPU bench results
+    gpu_fp32_tflops: Option<f64>,
+    gpu_fp16_tflops: Option<f64>,
+    gpu_int32_tops: Option<f64>,
+    gpu_buf_read_gbps: Option<f64>,
+    gpu_buf_write_gbps: Option<f64>,
+    gpu_buf_alloc_us: Option<f64>,
+    gpu_matmul_tflops: Option<f64>,
+    gpu_status: Option<String>,
+
     // Sparkline history - bandwidth
     write_history: Vec<u64>,
     read_history: Vec<u64>,
@@ -386,6 +424,12 @@ struct DashboardState {
     ecore_fp_history: Vec<u64>,
     mt_int_history: Vec<u64>,
     mt_fp_history: Vec<u64>,
+
+    // Sparkline history - GPU
+    gpu_fp32_history: Vec<u64>,
+    gpu_fp16_history: Vec<u64>,
+    gpu_buf_read_history: Vec<u64>,
+    gpu_matmul_history: Vec<u64>,
 
     // Stress state
     stress_pass: u64,
@@ -445,6 +489,14 @@ impl DashboardState {
             loaded_latency_ns: None,
             cache_latencies: Vec::new(),
             cache_bandwidths: Vec::new(),
+            gpu_fp32_tflops: None,
+            gpu_fp16_tflops: None,
+            gpu_int32_tops: None,
+            gpu_buf_read_gbps: None,
+            gpu_buf_write_gbps: None,
+            gpu_buf_alloc_us: None,
+            gpu_matmul_tflops: None,
+            gpu_status: None,
             write_history: Vec::new(),
             read_history: Vec::new(),
             copy_history: Vec::new(),
@@ -465,6 +517,10 @@ impl DashboardState {
             ecore_fp_history: Vec::new(),
             mt_int_history: Vec::new(),
             mt_fp_history: Vec::new(),
+            gpu_fp32_history: Vec::new(),
+            gpu_fp16_history: Vec::new(),
+            gpu_buf_read_history: Vec::new(),
+            gpu_matmul_history: Vec::new(),
             stress_pass: 0,
             stress_total_passed: 0,
             stress_total_failed: 0,
@@ -625,6 +681,38 @@ impl DashboardState {
                         push_sparkline(&mut self.loaded_latency_history, v);
                         if let Some(ref mut s) = self.metric_stats { s.loaded_latency.record(v); }
                     }
+                    BenchMetric::GpuFp32(v) => {
+                        self.gpu_fp32_tflops = Some(v);
+                        push_sparkline(&mut self.gpu_fp32_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_fp32.record(v); }
+                    }
+                    BenchMetric::GpuFp16(v) => {
+                        self.gpu_fp16_tflops = Some(v);
+                        push_sparkline(&mut self.gpu_fp16_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_fp16.record(v); }
+                    }
+                    BenchMetric::GpuInt32(v) => {
+                        self.gpu_int32_tops = Some(v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_int32.record(v); }
+                    }
+                    BenchMetric::GpuBufRead(v) => {
+                        self.gpu_buf_read_gbps = Some(v);
+                        push_sparkline(&mut self.gpu_buf_read_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_buf_read.record(v); }
+                    }
+                    BenchMetric::GpuBufWrite(v) => {
+                        self.gpu_buf_write_gbps = Some(v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_buf_write.record(v); }
+                    }
+                    BenchMetric::GpuBufAlloc(v) => {
+                        self.gpu_buf_alloc_us = Some(v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_buf_alloc.record(v); }
+                    }
+                    BenchMetric::GpuMatmul(v) => {
+                        self.gpu_matmul_tflops = Some(v);
+                        push_sparkline(&mut self.gpu_matmul_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.gpu_matmul.record(v); }
+                    }
                 }
             }
             WorkerMsg::StressPassResult { pass_num, passed, failed, errors, duration } => {
@@ -657,6 +745,9 @@ impl DashboardState {
             }
             WorkerMsg::StressTestProgress(name) => {
                 self.stress_current_test = name;
+            }
+            WorkerMsg::GpuStatus(msg) => {
+                self.gpu_status = Some(msg);
             }
             WorkerMsg::Done => {}
         }
@@ -833,6 +924,45 @@ fn worker_run_cpu_bench(max_bytes: usize, num_threads: u32, tx: &mpsc::Sender<Wo
     }
 }
 
+#[cfg(target_os = "macos")]
+fn worker_run_gpu_bench(tx: &mpsc::Sender<WorkerMsg>) {
+    let ctx = match gpu_bench::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(WorkerMsg::GpuStatus(e));
+            return;
+        }
+    };
+
+    if !is_running() { return; }
+    let v = ctx.bench_fp32_throughput();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuFp32(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_fp16_throughput();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuFp16(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_int32_throughput();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuInt32(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_buffer_read();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuBufRead(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_buffer_write();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuBufWrite(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_buffer_alloc();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuBufAlloc(v)));
+
+    if !is_running() { return; }
+    let v = ctx.bench_matmul();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuMatmul(v)));
+}
+
 fn worker_run_stress_loop(region: &mut [u64], tx: &mpsc::Sender<WorkerMsg>) {
     let mut pass_num = 0u64;
     while is_running() {
@@ -865,6 +995,10 @@ fn worker_run_full_stress_loop(region: &mut [u64], size_mb: usize, num_threads: 
         if !is_running() { break; }
 
         worker_run_cpu_bench(max_bytes, num_threads, tx);
+        if !is_running() { break; }
+
+        #[cfg(target_os = "macos")]
+        worker_run_gpu_bench(tx);
         if !is_running() { break; }
     }
 }
@@ -907,6 +1041,13 @@ fn worker_loop(mode: RunMode, mut region: Vec<u64>, size_mb: usize, num_threads:
                 let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::MtFp(v)));
             }
         }
+        RunMode::Gpu => {
+            while is_running() {
+                #[cfg(target_os = "macos")]
+                worker_run_gpu_bench(&tx);
+                if !is_running() { break; }
+            }
+        }
         RunMode::All => {
             // Loop: tests → StressPassResult → mem bench → cpu bench
             let mut pass_num = 0u64;
@@ -924,6 +1065,10 @@ fn worker_loop(mode: RunMode, mut region: Vec<u64>, size_mb: usize, num_threads:
                 if !is_running() { break; }
 
                 worker_run_cpu_bench(max_bytes, num_threads, &tx);
+                if !is_running() { break; }
+
+                #[cfg(target_os = "macos")]
+                worker_run_gpu_bench(&tx);
                 if !is_running() { break; }
             }
         }
@@ -1339,6 +1484,7 @@ fn draw_running(frame: &mut Frame, state: &DashboardState) {
         RunMode::Bench => draw_running_bench(frame, state),
         RunMode::Cpu => draw_running_cpu(frame, state),
         RunMode::MtCpu => draw_running_mt_cpu(frame, state),
+        RunMode::Gpu => draw_running_gpu(frame, state),
         RunMode::All => draw_running_all(frame, state),
         RunMode::Stress => draw_running_stress(frame, state),
         RunMode::FullStress => draw_running_full_stress(frame, state),
@@ -1427,8 +1573,21 @@ fn draw_running_mt_cpu(frame: &mut Frame, state: &DashboardState) {
     draw_mt_cpu_sparklines(frame, state, outer[2]);
 }
 
-// All: title + 3 panels (stress/bench/cpu) + bandwidth sparklines + pass history
-// (same layout as FullStress)
+// GPU: title + GPU panel + GPU sparklines
+fn draw_running_gpu(frame: &mut Frame, state: &DashboardState) {
+    let area = frame.area();
+    let outer = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(8),
+    ]).split(area);
+
+    running_title_bar(frame, state, outer[0]);
+    draw_gpu_panel(frame, state, outer[1]);
+    draw_gpu_sparklines(frame, state, outer[2]);
+}
+
+// All: title + panels (stress/bench/cpu/gpu) + bandwidth sparklines + pass history
 fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
 
@@ -1442,14 +1601,16 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
     running_title_bar(frame, state, outer[0]);
 
     let top_panels = Layout::horizontal([
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
     ]).split(outer[1]);
 
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
-    draw_stress_panel(frame, state, top_panels[2]);
+    draw_gpu_panel(frame, state, top_panels[2]);
+    draw_stress_panel(frame, state, top_panels[3]);
 
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
@@ -1488,14 +1649,16 @@ fn draw_running_full_stress(frame: &mut Frame, state: &DashboardState) {
     running_title_bar(frame, state, outer[0]);
 
     let top_panels = Layout::horizontal([
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
     ]).split(outer[1]);
 
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
-    draw_stress_panel(frame, state, top_panels[2]);
+    draw_gpu_panel(frame, state, top_panels[2]);
+    draw_stress_panel(frame, state, top_panels[3]);
 
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
@@ -1626,6 +1789,19 @@ fn write_log_content(
         }
     }
 
+    // GPU benchmarks
+    if ds.gpu_fp32_tflops.is_some() {
+        writeln!(w)?;
+        writeln!(w, "--- GPU Benchmarks (Metal) ---")?;
+        if let Some(v) = ds.gpu_fp32_tflops   { writeln!(w, "FP32:            {v:.3} Tflops/s")?; }
+        if let Some(v) = ds.gpu_fp16_tflops   { writeln!(w, "FP16:            {v:.3} Tflops/s")?; }
+        if let Some(v) = ds.gpu_int32_tops    { writeln!(w, "Int32:           {v:.3} Tops/s")?; }
+        if let Some(v) = ds.gpu_buf_read_gbps { writeln!(w, "Buf Read:        {v:.2} GB/s")?; }
+        if let Some(v) = ds.gpu_buf_write_gbps{ writeln!(w, "Buf Write:       {v:.2} GB/s")?; }
+        if let Some(v) = ds.gpu_buf_alloc_us  { writeln!(w, "Buf Alloc:       {v:.1} us")?; }
+        if let Some(v) = ds.gpu_matmul_tflops { writeln!(w, "MatMul:          {v:.3} Tflops/s")?; }
+    }
+
     // Stress test
     if ds.stress_pass > 0 {
         writeln!(w)?;
@@ -1681,6 +1857,13 @@ fn write_log_content(
             for (label, s) in &stats.cache_bandwidths {
                 stat_line(w, &format!("Bandwidth {label}"), "GB/s", s)?;
             }
+            stat_line(w, "GPU FP32 throughput", "Tflops/s", &stats.gpu_fp32)?;
+            stat_line(w, "GPU FP16 throughput", "Tflops/s", &stats.gpu_fp16)?;
+            stat_line(w, "GPU Int32 throughput", "Tops/s", &stats.gpu_int32)?;
+            stat_line(w, "GPU buffer read", "GB/s", &stats.gpu_buf_read)?;
+            stat_line(w, "GPU buffer write", "GB/s", &stats.gpu_buf_write)?;
+            stat_line(w, "GPU buffer alloc", "us", &stats.gpu_buf_alloc)?;
+            stat_line(w, "GPU matmul", "Tflops/s", &stats.gpu_matmul)?;
         }
     }
 
@@ -1892,6 +2075,54 @@ fn draw_summary(frame: &mut Frame, ss: &SummaryState) {
         lines.push(Line::raw(""));
     }
 
+    // GPU results
+    if ds.gpu_fp32_tflops.is_some() {
+        lines.push(Line::from(Span::styled("  GPU Benchmarks (Metal):", hdr_style)));
+        if let Some(v) = ds.gpu_fp32_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    FP32:       "),
+                Span::styled(format!("{:.3} Tflops/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_fp16_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    FP16:       "),
+                Span::styled(format!("{:.3} Tflops/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_int32_tops {
+            lines.push(Line::from(vec![
+                Span::raw("    Int32:      "),
+                Span::styled(format!("{:.3} Tops/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_buf_read_gbps {
+            lines.push(Line::from(vec![
+                Span::raw("    Buf Read:   "),
+                Span::styled(format!("{:.2} GB/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_buf_write_gbps {
+            lines.push(Line::from(vec![
+                Span::raw("    Buf Write:  "),
+                Span::styled(format!("{:.2} GB/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_buf_alloc_us {
+            lines.push(Line::from(vec![
+                Span::raw("    Buf Alloc:  "),
+                Span::styled(format!("{:.1} us", v), val_style),
+            ]));
+        }
+        if let Some(v) = ds.gpu_matmul_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    MatMul:     "),
+                Span::styled(format!("{:.3} Tflops/s", v), val_style),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
     // Min/max/avg table (now available for all modes)
     if let Some(ref stats) = ds.metric_stats {
         if stats.seq_write.count > 0 {
@@ -1954,6 +2185,16 @@ fn draw_summary(frame: &mut Frame, ss: &SummaryState) {
             lines.push(Line::styled(format!("  {}", "-".repeat(72)), Style::default().fg(Color::DarkGray)));
             for (label, s) in &stats.cache_bandwidths {
                 lines.push(stat_line(&format!("Bandwidth {}", label), "GB/s", s));
+            }
+            if stats.gpu_fp32.count > 0 {
+                lines.push(Line::styled(format!("  {}", "-".repeat(72)), Style::default().fg(Color::DarkGray)));
+                lines.push(stat_line("GPU FP32 throughput", "Tflops/s", &stats.gpu_fp32));
+                lines.push(stat_line("GPU FP16 throughput", "Tflops/s", &stats.gpu_fp16));
+                lines.push(stat_line("GPU Int32 throughput", "Tops/s", &stats.gpu_int32));
+                lines.push(stat_line("GPU buffer read", "GB/s", &stats.gpu_buf_read));
+                lines.push(stat_line("GPU buffer write", "GB/s", &stats.gpu_buf_write));
+                lines.push(stat_line("GPU buffer alloc", "us", &stats.gpu_buf_alloc));
+                lines.push(stat_line("GPU matmul", "Tflops/s", &stats.gpu_matmul));
             }
         }
     }
@@ -2258,6 +2499,136 @@ fn draw_cpu_panel_inner(frame: &mut Frame, state: &DashboardState, area: Rect, s
 
     let paragraph = Paragraph::new(lines).block(block).scroll((effective_scroll, 0));
     frame.render_widget(paragraph, area);
+}
+
+fn draw_gpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
+    let border_style = Style::default().fg(Color::Yellow);
+    let scroll = state.scroll_offset;
+
+    let mut lines = Vec::new();
+    let val_style = Style::default().fg(Color::Cyan);
+    let hdr_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+
+    if let Some(ref msg) = state.gpu_status {
+        lines.push(Line::styled(format!("  {}", msg), Style::default().fg(Color::Red)));
+    }
+
+    if state.gpu_fp32_tflops.is_some() || state.gpu_fp16_tflops.is_some() || state.gpu_int32_tops.is_some() {
+        lines.push(Line::from(Span::styled("  Compute:", hdr_style)));
+        if let Some(v) = state.gpu_fp32_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    FP32:   "),
+                Span::styled(format!("{:>8.3} Tflops", v), val_style),
+            ]));
+        }
+        if let Some(v) = state.gpu_fp16_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    FP16:   "),
+                Span::styled(format!("{:>8.3} Tflops", v), val_style),
+            ]));
+        }
+        if let Some(v) = state.gpu_int32_tops {
+            lines.push(Line::from(vec![
+                Span::raw("    Int32:  "),
+                Span::styled(format!("{:>8.3} Tops", v), val_style),
+            ]));
+        }
+    }
+
+    if state.gpu_buf_read_gbps.is_some() || state.gpu_buf_write_gbps.is_some() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("  Memory BW:", hdr_style)));
+        if let Some(v) = state.gpu_buf_read_gbps {
+            lines.push(Line::from(vec![
+                Span::raw("    Read:   "),
+                Span::styled(format!("{:>8.2} GB/s", v), val_style),
+            ]));
+        }
+        if let Some(v) = state.gpu_buf_write_gbps {
+            lines.push(Line::from(vec![
+                Span::raw("    Write:  "),
+                Span::styled(format!("{:>8.2} GB/s", v), val_style),
+            ]));
+        }
+    }
+
+    if let Some(v) = state.gpu_buf_alloc_us {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::raw("  Buf Alloc:  "),
+            Span::styled(format!("{:>6.1} us", v), val_style),
+        ]));
+    }
+
+    if let Some(v) = state.gpu_matmul_tflops {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("  Workload:", hdr_style)));
+        lines.push(Line::from(vec![
+            Span::raw("    MatMul: "),
+            Span::styled(format!("{:>8.3} Tflops", v), val_style),
+        ]));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::styled("  Waiting for results...", Style::default().fg(Color::DarkGray)));
+    }
+
+    let content_height = lines.len() as u16;
+    let inner_height = area.height.saturating_sub(2);
+    let max_scroll = content_height.saturating_sub(inner_height);
+    let effective_scroll = scroll.min(max_scroll);
+    let overflows = content_height > inner_height;
+
+    let title = if overflows {
+        format!(" GPU BENCH [{}/{}] ", effective_scroll + 1, max_scroll + 1)
+    } else {
+        " GPU BENCH (Metal) ".to_string()
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_style(border_style);
+
+    let paragraph = Paragraph::new(lines).block(block).scroll((effective_scroll, 0));
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_gpu_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
+    let block = Block::bordered()
+        .title(" GPU THROUGHPUT HISTORY ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut sparkline_rows: Vec<(&str, &[u64], Color)> = Vec::new();
+
+    if !state.gpu_fp32_history.is_empty() {
+        sparkline_rows.push(("FP32:       ", &state.gpu_fp32_history, Color::Green));
+    }
+    if !state.gpu_fp16_history.is_empty() {
+        sparkline_rows.push(("FP16:       ", &state.gpu_fp16_history, Color::Blue));
+    }
+    if !state.gpu_buf_read_history.is_empty() {
+        sparkline_rows.push(("Buf Read:   ", &state.gpu_buf_read_history, Color::Magenta));
+    }
+    if !state.gpu_matmul_history.is_empty() {
+        sparkline_rows.push(("MatMul:     ", &state.gpu_matmul_history, Color::Cyan));
+    }
+
+    let constraints: Vec<Constraint> = sparkline_rows.iter().map(|_| Constraint::Length(1)).collect();
+    let rows = Layout::vertical(constraints).split(inner);
+
+    let label_width = 12u16;
+
+    for (i, (label, data, color)) in sparkline_rows.iter().enumerate() {
+        if i >= rows.len() { break; }
+        let label_area = Rect { width: label_width, ..rows[i] };
+        let spark_area = Rect { x: rows[i].x + label_width, width: rows[i].width.saturating_sub(label_width), ..rows[i] };
+        frame.render_widget(Span::styled(*label, Style::default().fg(*color)), label_area);
+        frame.render_widget(
+            Sparkline::default().data(*data).style(Style::default().fg(*color)),
+            spark_area,
+        );
+    }
 }
 
 fn draw_mt_cpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {

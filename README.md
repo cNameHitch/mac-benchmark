@@ -58,13 +58,26 @@ Runs CPU and cache hierarchy benchmarks with a max working set of 64 MB:
 - **Cache latency ladder** — pointer-chase at 12 working set sizes (32 KB to 64 MB)
 - **Bandwidth ladder** — sequential read throughput at the same sizes
 
+### GPU Benchmarks
+
+```
+cargo run --release -- --gpu
+```
+
+Runs Metal GPU compute benchmarks:
+
+- **FP32/FP16/Int32 throughput** — 1M threads x 4 FMA chains x 1024 iterations
+- **Buffer read/write** — sequential float4 operations on a 64 MB buffer
+- **Buffer alloc** — median allocation time for a 16 MB shared buffer
+- **Matrix multiply** — 1024x1024 FP32 tiled matmul (16x16 tiles, threadgroup memory)
+
 ### All (Tests + Benchmarks)
 
 ```
 cargo run --release -- --all 512
 ```
 
-Runs memory tests, memory benchmarks, and CPU benchmarks.
+Runs memory tests, memory benchmarks, CPU benchmarks, and GPU benchmarks.
 
 ### Stress Test
 
@@ -89,6 +102,7 @@ Comprehensive stress test that runs every cycle:
 3. **CPU benchmarks** — integer/FP dependent + independent chains
 4. **Cache latency ladder** — pointer chase at each fitting working set size
 5. **Cache bandwidth ladder** — sequential read at each fitting working set size
+6. **GPU benchmarks** — Metal compute throughput, memory bandwidth, and matrix multiply
 
 Includes sparkline history, pass history table, and regression tracking (min/max/avg for every metric). `--dashboard` is an alias for `--full-stress`.
 
@@ -119,7 +133,8 @@ Launch → Menu (or Running if CLI flag given) → Summary → Menu or Quit
 | `--test` | `-t` | Memory correctness tests |
 | `--bench` | `-b` | Memory performance benchmarks |
 | `--cpu` | | CPU benchmarks + cache hierarchy profiling |
-| `--all` | `-a` | Tests + memory + CPU benchmarks |
+| `--gpu` | | GPU benchmarks (Metal compute) |
+| `--all` | `-a` | Tests + memory + CPU + GPU benchmarks |
 | `--stress` | `-s` | Continuous correctness stress test |
 | `--full-stress` | `-F` | Full stress: correctness + all benchmarks per cycle |
 | `--dashboard` | | Alias for `--full-stress` |

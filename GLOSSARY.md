@@ -12,9 +12,10 @@ Terms used throughout mac-benchmark, including all metrics seen in log output.
 | **Bench** | Runs memory performance benchmarks: sequential write/read, copy, random read latency, and stride throughput. |
 | **CPU** | Runs single-threaded CPU throughput benchmarks (integer, FP64, FP32, NEON) plus cache hierarchy profiling (latency ladder and bandwidth ladder). |
 | **MT CPU** | Multi-threaded CPU benchmark that saturates all cores with integer and floating-point workloads. |
-| **All** | Runs Test + Bench + CPU in a single pass. |
+| **GPU** | Runs Metal GPU compute benchmarks: FP32/FP16/Int32 throughput, buffer read/write bandwidth, buffer allocation latency, and tiled matrix multiply. |
+| **All** | Runs Test + Bench + CPU + GPU in a single pass. |
 | **Stress** | Continuously repeats the 10 correctness tests in a loop until stopped or duration expires. |
-| **Full Stress** | Comprehensive stress mode that runs every cycle: correctness tests, all memory benchmarks, all CPU benchmarks, cache latency ladder, and cache bandwidth ladder. Tracks min/max/avg statistics and regression detection across passes. `--dashboard` is an alias. |
+| **Full Stress** | Comprehensive stress mode that runs every cycle: correctness tests, all memory benchmarks, all CPU benchmarks, cache latency/bandwidth ladders, and GPU benchmarks. Tracks min/max/avg statistics and regression detection across passes. `--dashboard` is an alias. |
 
 ---
 
@@ -50,6 +51,20 @@ Terms used throughout mac-benchmark, including all metrics seen in log output.
 | **E-core FP** | `E-core FP` / `E-core FP64` | FP64 throughput (Gflops/s) measured while pinned to an efficiency core. |
 | **MT Int** | `MT Int (Nc)` / `Integer multi-thread (Nc)` | Aggregate integer throughput (Gops/s) with N threads each running the 4-chain independent integer workload. |
 | **MT FP** | `MT FP (Nc)` / `FP64 multi-thread (Nc)` | Aggregate FP64 throughput (Gflops/s) with N threads each running the 4-chain independent FMA workload. |
+
+---
+
+## GPU Benchmarks (Metal)
+
+| Term | Log Label | Description |
+|---|---|---|
+| **GPU FP32** | `FP32` / `GPU FP32 throughput` | GPU floating-point throughput (Tflops/s) measured by dispatching 1M threads each running 4 independent FMA chains for 1024 iterations using 32-bit floats. |
+| **GPU FP16** | `FP16` / `GPU FP16 throughput` | Same as GPU FP32 but using 16-bit half-precision floats. M3/M4 chips typically achieve ~2x the FP32 rate. |
+| **GPU Int32** | `Int32` / `GPU Int32 throughput` | GPU integer throughput (Tops/s) measured with 4 independent multiply-add chains per thread. |
+| **GPU Buf Read** | `Buf Read` / `GPU buffer read` | GPU memory read bandwidth (GB/s) measured by reading 64 MB of float4 values with a grid-stride loop pattern. |
+| **GPU Buf Write** | `Buf Write` / `GPU buffer write` | GPU memory write bandwidth (GB/s) measured by writing 64 MB of float4 values. |
+| **GPU Buf Alloc** | `Buf Alloc` / `GPU buffer alloc` | Median time (microseconds) to allocate a 16 MB `StorageModeShared` Metal buffer, measured over 100 iterations. Lower is better. |
+| **GPU MatMul** | `MatMul` / `GPU matmul` | GPU matrix multiply throughput (Tflops/s) for a 1024x1024 FP32 tiled matmul using 16x16 threadgroup tiles with shared memory. Measures real-workload GPU compute performance. |
 
 ---
 
@@ -98,7 +113,10 @@ Terms used throughout mac-benchmark, including all metrics seen in log output.
 | **GB/s** | Gigabytes per second (10^9 bytes/s). Used for all throughput/bandwidth metrics. |
 | **Gops/s** | Giga-operations per second (10^9 ops/s). Used for integer throughput metrics. |
 | **Gflops/s** | Giga-floating-point-operations per second (10^9 flops/s). Used for FP throughput metrics. |
+| **Tflops/s** | Tera-floating-point-operations per second (10^12 flops/s). Used for GPU throughput metrics. |
+| **Tops/s** | Tera-operations per second (10^12 ops/s). Used for GPU integer throughput. |
 | **ns** | Nanoseconds. Used for all latency metrics. |
+| **us** | Microseconds. Used for GPU buffer allocation latency. |
 | **MB** | Megabytes. Used for the memory region size parameter. |
 
 ---
@@ -142,6 +160,9 @@ Terms used throughout mac-benchmark, including all metrics seen in log output.
 | **NEON** | ARM's SIMD instruction set (Advanced SIMD) available on AArch64. Used for vectorized FP32 and integer benchmarks with 128-bit registers (4 × f32 or 4 × u32 lanes). |
 | **ILP** | Instruction-Level Parallelism. The ability of a CPU core to execute multiple independent instructions simultaneously. Measured by comparing dependent (1 chain) vs. independent (4 chain) throughput. |
 | **QoS Class** | macOS Quality of Service classes used to influence thread scheduling. `USER_INTERACTIVE` (0x21) targets P-cores; `BACKGROUND` (0x09) targets E-cores. Used for P-core/E-core isolation benchmarks. |
-| **BENCH_PASSES** | Number of times each benchmark is repeated to find the best (minimum-time) result. Default: 3 for memory, 5 for CPU. |
+| **Metal** | Apple's GPU programming API, the only GPU compute API on macOS. Shaders are written in Metal Shading Language (MSL) and compiled at runtime via `newLibraryWithSource`. |
+| **StorageModeShared** | A Metal buffer storage mode where CPU and GPU share the same memory (zero-copy on Apple Silicon's unified memory architecture). Used for all GPU benchmark buffers. |
+| **Threadgroup Memory** | Fast on-chip memory shared between threads in a Metal threadgroup (similar to CUDA shared memory). Used in the tiled matrix multiply kernel. |
+| **BENCH_PASSES** | Number of times each benchmark is repeated to find the best (minimum-time) result. Default: 3 for memory, CPU, and GPU. 5 for single-core CPU. |
 | **CHASE_STEPS** | Number of pointer-chase iterations per latency measurement. 10M for memory latency, 5M for cache latency ladder. |
 | **Barrier** | A `std::sync::Barrier` used to synchronize thread start times in multi-threaded benchmarks, ensuring all threads begin work simultaneously. |
