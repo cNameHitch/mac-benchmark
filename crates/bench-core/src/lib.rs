@@ -17,6 +17,10 @@ pub fn install_signal_handler() {
     unsafe { signal(2, on_sigint) }; // SIGINT = 2
 }
 
+pub fn is_running() -> bool {
+    RUNNING.load(Ordering::Relaxed)
+}
+
 pub fn vol_write(ptr: &mut u64, val: u64) {
     unsafe { ptr::write_volatile(ptr, val) };
 }

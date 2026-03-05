@@ -1,13 +1,6 @@
 use std::env;
 use std::time::Duration;
 
-mod helpers;
-mod tests;
-mod bench;
-mod cpu_bench;
-#[cfg(target_os = "macos")]
-mod gpu_bench;
-mod sysinfo;
 mod dashboard;
 
 use dashboard::RunMode;
@@ -19,8 +12,24 @@ fn main() {
 
     match mode {
         Some(InternalMode::Info) => {
-            let info = sysinfo::detect();
+            let info = mac_sysinfo::detect();
             info.print();
+            let dynamic = mac_sysinfo::poll_dynamic();
+            println!("  Thermal : {}", dynamic.thermal_state.label());
+            println!("  RAM used: {:.1}/{:.0} GB", dynamic.memory_used_gb, dynamic.memory_total_gb);
+            if let Some(pct) = dynamic.battery_percent {
+                let status = if dynamic.battery_charging == Some(true) { " (charging)" }
+                    else if dynamic.battery_on_ac == Some(true) { " (AC)" }
+                    else { " (battery)" };
+                print!("  Battery : {}%{}", pct, status);
+                if let Some(temp) = dynamic.battery_temp_c {
+                    print!("  {:.1}C", temp);
+                }
+                if let Some(cycles) = dynamic.battery_cycle_count {
+                    print!("  {} cycles", cycles);
+                }
+                println!();
+            }
         }
         Some(InternalMode::Run(run_mode)) => {
             let duration = duration_minutes.map(|m| Duration::from_secs(m * 60));

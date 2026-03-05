@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use crate::helpers::{vol_read, vol_write, xorshift64};
+use bench_core::{vol_read, vol_write, xorshift64};
 
 pub const BENCH_PASSES: u32 = 3;
 pub const CHASE_REGION_ELEMS: usize = 8 * 1024 * 1024; // 64 MB worth of u64s

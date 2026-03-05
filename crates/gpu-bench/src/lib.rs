@@ -126,8 +126,7 @@ impl GpuContext {
             Some(b) => b,
             None => return 0.0,
         };
-        let count_buf = self.make_u32_buffer(BW_FLOAT4_COUNT as u32);
-        let count_buf = match count_buf {
+        let count_buf = match self.make_u32_buffer(BW_FLOAT4_COUNT as u32) {
             Some(b) => b,
             None => return 0.0,
         };
