@@ -11,13 +11,9 @@ use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use crate::bench::*;
-use crate::cpu_bench;
-#[cfg(target_os = "macos")]
-use crate::gpu_bench;
-use crate::helpers::{format_duration, install_signal_handler, RUNNING};
-use crate::sysinfo;
-use crate::tests::run_test_pass;
+use bench_core::{format_duration, install_signal_handler, RUNNING};
+use mem_bench::bench::*;
+use mem_bench::tests::run_test_pass;
 
 // ---------------------------------------------------------------------------
 // Run mode
@@ -106,10 +102,17 @@ enum MenuField {
 
 struct MenuState {
     chip_name: String,
-    memory_gb: u64,
+    model_name: String,
     total_cores: u32,
     p_cores: u32,
     e_cores: u32,
+    gpu_cores: u32,
+    metal_version: String,
+    os_version: String,
+    os_build: String,
+    uptime_secs: u64,
+    dynamic: mac_sysinfo::DynamicInfo,
+    last_dynamic_poll: Instant,
     selected_mode: usize,
     size_input: String,
     duration_input: String,
@@ -118,13 +121,21 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(info: &sysinfo::SystemInfo, size_mb: usize, duration: Option<Duration>, threads: Option<u32>) -> Self {
+    fn new(info: &mac_sysinfo::SystemInfo, size_mb: usize, duration: Option<Duration>, threads: Option<u32>) -> Self {
+        let dynamic = mac_sysinfo::poll_dynamic();
         Self {
             chip_name: info.chip_name.clone(),
-            memory_gb: info.memory_gb,
+            model_name: info.model_name.clone(),
             total_cores: info.total_cores,
             p_cores: info.p_cores,
             e_cores: info.e_cores,
+            gpu_cores: info.gpu_cores,
+            metal_version: info.metal_version.clone(),
+            os_version: info.os_version.clone(),
+            os_build: info.os_build.clone(),
+            uptime_secs: info.uptime_secs,
+            dynamic,
+            last_dynamic_poll: Instant::now(),
             selected_mode: 0,
             size_input: size_mb.to_string(),
             duration_input: duration.map(|d| (d.as_secs() / 60).to_string()).unwrap_or_default(),
@@ -362,6 +373,11 @@ struct DashboardState {
     num_threads: u32,
     start: Instant,
     chip_name: String,
+    gpu_cores: u32,
+    metal_version: String,
+    os_version: String,
+    dynamic: mac_sysinfo::DynamicInfo,
+    last_dynamic_poll: Instant,
 
     // Bench results
     seq_write_gbps: Option<f64>,
@@ -454,7 +470,7 @@ struct PassRecord {
 }
 
 impl DashboardState {
-    fn new(mode: RunMode, size_mb: usize, num_threads: u32, chip_name: String) -> Self {
+    fn new(mode: RunMode, size_mb: usize, num_threads: u32, info: &mac_sysinfo::SystemInfo) -> Self {
         let count = size_mb * 1024 * 1024 / size_of::<u64>();
         let max_bytes = size_mb * 1024 * 1024;
         let metric_stats = Some(FullStressStats::new(count, max_bytes));
@@ -464,7 +480,12 @@ impl DashboardState {
             size_mb,
             num_threads,
             start: Instant::now(),
-            chip_name,
+            chip_name: info.chip_name.clone(),
+            gpu_cores: info.gpu_cores,
+            metal_version: info.metal_version.clone(),
+            os_version: info.os_version.clone(),
+            dynamic: mac_sysinfo::poll_dynamic(),
+            last_dynamic_poll: Instant::now(),
             seq_write_gbps: None,
             seq_read_gbps: None,
             copy_gbps: None,
@@ -1086,11 +1107,11 @@ fn worker_loop(mode: RunMode, mut region: Vec<u64>, size_mb: usize, num_threads:
 // start_running helper
 // ---------------------------------------------------------------------------
 
-fn start_running(mode: RunMode, size_mb: usize, duration: Option<Duration>, num_threads: u32, chip_name: &str) -> RunningState {
+fn start_running(mode: RunMode, size_mb: usize, duration: Option<Duration>, num_threads: u32, info: &mac_sysinfo::SystemInfo) -> RunningState {
     let count = size_mb * 1024 * 1024 / size_of::<u64>();
     let region = vec![0u64; count];
     let (tx, rx) = mpsc::channel();
-    let dashboard = DashboardState::new(mode, size_mb, num_threads, chip_name.to_string());
+    let dashboard = DashboardState::new(mode, size_mb, num_threads, info);
 
     let worker = thread::spawn(move || {
         worker_loop(mode, region, size_mb, num_threads, tx);
@@ -1115,7 +1136,7 @@ fn start_running(mode: RunMode, size_mb: usize, duration: Option<Duration>, num_
 pub fn run(mode: Option<RunMode>, size_mb: usize, duration: Option<Duration>, threads: Option<u32>) {
     install_signal_handler();
 
-    let info = sysinfo::detect();
+    let info = mac_sysinfo::detect();
     let thread_count = threads.unwrap_or(info.total_cores);
 
     // Set up panic hook to restore terminal
@@ -1136,13 +1157,17 @@ pub fn run(mode: Option<RunMode>, size_mb: usize, duration: Option<Duration>, th
         None => Screen::Menu(MenuState::new(&info, size_mb, duration, threads)),
         Some(m) => {
             RUNNING.store(true, Ordering::Relaxed);
-            Screen::Running(start_running(m, size_mb, duration, thread_count, &info.chip_name))
+            Screen::Running(start_running(m, size_mb, duration, thread_count, &info))
         }
     };
 
     loop {
         let transition = match &mut screen {
             Screen::Menu(menu) => {
+                if menu.last_dynamic_poll.elapsed() >= Duration::from_secs(3) {
+                    menu.dynamic = mac_sysinfo::poll_dynamic();
+                    menu.last_dynamic_poll = Instant::now();
+                }
                 let _ = terminal.draw(|frame| draw_menu(frame, menu));
                 handle_menu_input(menu)
             }
@@ -1164,6 +1189,12 @@ pub fn run(mode: Option<RunMode>, size_mb: usize, duration: Option<Duration>, th
                     rs.dashboard.apply(msg);
                 }
 
+                // Poll dynamic system info every 3 seconds
+                if rs.dashboard.last_dynamic_poll.elapsed() >= Duration::from_secs(3) {
+                    rs.dashboard.dynamic = mac_sysinfo::poll_dynamic();
+                    rs.dashboard.last_dynamic_poll = Instant::now();
+                }
+
                 if rs.done {
                     Transition::ToSummary
                 } else {
@@ -1181,7 +1212,7 @@ pub fn run(mode: Option<RunMode>, size_mb: usize, duration: Option<Duration>, th
             Transition::Stay => screen,
             Transition::ToRunning(mode, sz, dur, threads) => {
                 RUNNING.store(true, Ordering::Relaxed);
-                Screen::Running(start_running(mode, sz, dur, threads, &info.chip_name))
+                Screen::Running(start_running(mode, sz, dur, threads, &info))
             }
             Transition::ToSummary => {
                 // Join the worker thread
@@ -1361,12 +1392,78 @@ fn handle_summary_input(ss: &mut SummaryState) -> Transition {
 // Draw: Menu
 // ---------------------------------------------------------------------------
 
+fn thermal_color(state: mac_sysinfo::ThermalState) -> Color {
+    match state {
+        mac_sysinfo::ThermalState::Nominal => Color::Green,
+        mac_sysinfo::ThermalState::Fair => Color::Yellow,
+        mac_sysinfo::ThermalState::Serious => Color::Red,
+        mac_sysinfo::ThermalState::Critical => Color::LightRed,
+        mac_sysinfo::ThermalState::Unknown => Color::DarkGray,
+    }
+}
+
+fn battery_color(percent: u32) -> Color {
+    match percent {
+        0..=10 => Color::Red,
+        11..=25 => Color::Yellow,
+        _ => Color::Green,
+    }
+}
+
+fn draw_system_bar(frame: &mut Frame, state: &DashboardState, area: Rect) {
+    let d = &state.dynamic;
+
+    let mut spans: Vec<Span> = vec![
+        Span::styled(" Thermal: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            d.thermal_state.label(),
+            Style::default().fg(thermal_color(d.thermal_state)),
+        ),
+        Span::styled(
+            format!("  |  RAM: {:.1}/{:.0} GB", d.memory_used_gb, d.memory_total_gb),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+
+    if let Some(pct) = d.battery_percent {
+        let status = if d.battery_charging == Some(true) {
+            " [charging]"
+        } else if d.battery_on_ac == Some(true) {
+            " [AC]"
+        } else {
+            ""
+        };
+        spans.push(Span::styled("  |  Batt: ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("{}%{}", pct, status),
+            Style::default().fg(battery_color(pct)),
+        ));
+        if let Some(temp) = d.battery_temp_c {
+            spans.push(Span::styled(
+                format!(" {:.1}C", temp),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    if state.gpu_cores > 0 {
+        spans.push(Span::styled(
+            format!("  |  GPU: {} cores", state.gpu_cores),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let bar = Paragraph::new(Line::from(spans))
+        .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray)));
+    frame.render_widget(bar, area);
+}
+
 fn draw_menu(frame: &mut Frame, menu: &MenuState) {
     let area = frame.area();
 
     let outer = Layout::vertical([
         Constraint::Length(3),  // title
-        Constraint::Length(3),  // system info
+        Constraint::Length(7),  // system info
         Constraint::Min(10),   // mode list
         Constraint::Length(3),  // size input
         Constraint::Length(3),  // duration input
@@ -1381,20 +1478,101 @@ fn draw_menu(frame: &mut Frame, menu: &MenuState) {
         .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(title_block, outer[0]);
 
-    // System info bar
+    // System info panel
     let cores_str = if menu.p_cores > 0 && menu.e_cores > 0 {
-        format!("{} ({}P+{}E)", menu.total_cores, menu.p_cores, menu.e_cores)
+        format!("{} ({}P + {}E)", menu.total_cores, menu.p_cores, menu.e_cores)
     } else {
         format!("{}", menu.total_cores)
     };
-    let sys_info = format!(
-        " {} | {} GB RAM | {} cores ",
-        menu.chip_name, menu.memory_gb, cores_str
+
+    let gpu_str = if menu.gpu_cores > 0 {
+        format!("{} cores ({})", menu.gpu_cores, menu.metal_version)
+    } else {
+        "N/A".to_string()
+    };
+
+    let mem_usage = format!(
+        "{:.1}/{:.0} GB used",
+        menu.dynamic.memory_used_gb, menu.dynamic.memory_total_gb
     );
+
+    let mut line2_parts: Vec<Span> = vec![
+        Span::styled("  Thermal: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            menu.dynamic.thermal_state.label(),
+            Style::default().fg(thermal_color(menu.dynamic.thermal_state)),
+        ),
+    ];
+
+    if let Some(pct) = menu.dynamic.battery_percent {
+        let charging = if menu.dynamic.battery_charging == Some(true) {
+            " [charging]"
+        } else if menu.dynamic.battery_on_ac == Some(true) {
+            " [AC]"
+        } else {
+            ""
+        };
+        line2_parts.push(Span::styled("  |  Battery: ", Style::default().fg(Color::DarkGray)));
+        line2_parts.push(Span::styled(
+            format!("{}%{}", pct, charging),
+            Style::default().fg(battery_color(pct)),
+        ));
+        if let Some(temp) = menu.dynamic.battery_temp_c {
+            line2_parts.push(Span::styled(
+                format!("  {:.1}C", temp),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if let Some(cycles) = menu.dynamic.battery_cycle_count {
+            line2_parts.push(Span::styled(
+                format!("  {} cycles", cycles),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    let os_str = if !menu.os_version.is_empty() {
+        format!("macOS {} ({})", menu.os_version, menu.os_build)
+    } else {
+        String::new()
+    };
+
+    let uptime_str = if menu.uptime_secs > 0 {
+        format!("up {}", mac_sysinfo::format_uptime(menu.uptime_secs))
+    } else {
+        String::new()
+    };
+
+    let sys_lines = vec![
+        Line::from(vec![
+            Span::styled("  Chip: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&menu.chip_name, Style::default().fg(Color::White)),
+            Span::styled("  |  CPU: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&cores_str, Style::default().fg(Color::White)),
+            Span::styled("  |  GPU: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&gpu_str, Style::default().fg(Color::White)),
+            Span::styled("  |  RAM: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&mem_usage, Style::default().fg(Color::White)),
+        ]),
+        Line::from(line2_parts),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(&os_str, Style::default().fg(Color::DarkGray)),
+            Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ({})", menu.model_name, menu.chip_name),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&uptime_str, Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
     let sys_block = Block::bordered()
-        .title(sys_info)
+        .title(" System ")
         .border_style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(sys_block, outer[1]);
+    let sys_para = Paragraph::new(sys_lines).block(sys_block);
+    frame.render_widget(sys_para, outer[1]);
 
     // Mode list
     let mode_border_style = if menu.active_field == MenuField::ModeList {
@@ -1515,13 +1693,15 @@ fn draw_running_test(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Min(6),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_stress_panel(frame, state, outer[1]);
-    draw_pass_history(frame, state, outer[2]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_stress_panel(frame, state, outer[2]);
+    draw_pass_history(frame, state, outer[3]);
 }
 
 // Bench: title + bench panel + bandwidth/latency sparklines
@@ -1529,17 +1709,19 @@ fn draw_running_bench(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(5),
         Constraint::Length(8),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_bench_panel(frame, state, outer[1]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_bench_panel(frame, state, outer[2]);
 
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
         Constraint::Percentage(25),
-    ]).split(outer[2]);
+    ]).split(outer[3]);
 
     draw_bandwidth_sparklines(frame, state, sparkline_panels[0]);
     draw_latency_sparkline(frame, state, sparkline_panels[1]);
@@ -1550,13 +1732,15 @@ fn draw_running_cpu(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(5),
         Constraint::Length(14),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_cpu_panel(frame, state, outer[1]);
-    draw_cpu_sparklines(frame, state, outer[2]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_cpu_panel(frame, state, outer[2]);
+    draw_cpu_sparklines(frame, state, outer[3]);
 }
 
 // MT CPU: title + MT panel + MT sparklines
@@ -1564,13 +1748,15 @@ fn draw_running_mt_cpu(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(5),
         Constraint::Length(6),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_mt_cpu_panel(frame, state, outer[1]);
-    draw_mt_cpu_sparklines(frame, state, outer[2]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_mt_cpu_panel(frame, state, outer[2]);
+    draw_mt_cpu_sparklines(frame, state, outer[3]);
 }
 
 // GPU: title + GPU panel + GPU sparklines
@@ -1578,13 +1764,15 @@ fn draw_running_gpu(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(5),
         Constraint::Length(8),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_gpu_panel(frame, state, outer[1]);
-    draw_gpu_sparklines(frame, state, outer[2]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_gpu_panel(frame, state, outer[2]);
+    draw_gpu_sparklines(frame, state, outer[3]);
 }
 
 // All: title + panels (stress/bench/cpu/gpu) + bandwidth sparklines + pass history
@@ -1593,19 +1781,21 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
 
     let outer = Layout::vertical([
         Constraint::Length(3),  // title
+        Constraint::Length(3),  // system bar
         Constraint::Min(12),   // panels
         Constraint::Length(7), // sparklines
         Constraint::Min(6),    // pass history
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
+    draw_system_bar(frame, state, outer[1]);
 
     let top_panels = Layout::horizontal([
         Constraint::Percentage(25),
         Constraint::Percentage(25),
         Constraint::Percentage(25),
         Constraint::Percentage(25),
-    ]).split(outer[1]);
+    ]).split(outer[2]);
 
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
@@ -1615,25 +1805,27 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
         Constraint::Percentage(25),
-    ]).split(outer[2]);
+    ]).split(outer[3]);
 
     draw_bandwidth_sparklines(frame, state, sparkline_panels[0]);
     draw_latency_sparkline(frame, state, sparkline_panels[1]);
 
-    draw_pass_history(frame, state, outer[3]);
+    draw_pass_history(frame, state, outer[4]);
 }
 
 fn draw_running_stress(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
     let outer = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Min(6),
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
-    draw_stress_panel(frame, state, outer[1]);
-    draw_pass_history(frame, state, outer[2]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_stress_panel(frame, state, outer[2]);
+    draw_pass_history(frame, state, outer[3]);
 }
 
 fn draw_running_full_stress(frame: &mut Frame, state: &DashboardState) {
@@ -1641,19 +1833,21 @@ fn draw_running_full_stress(frame: &mut Frame, state: &DashboardState) {
 
     let outer = Layout::vertical([
         Constraint::Length(3),  // title
+        Constraint::Length(3),  // system bar
         Constraint::Min(12),   // panels
         Constraint::Length(7), // sparklines
         Constraint::Min(6),    // pass history
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
+    draw_system_bar(frame, state, outer[1]);
 
     let top_panels = Layout::horizontal([
         Constraint::Percentage(25),
         Constraint::Percentage(25),
         Constraint::Percentage(25),
         Constraint::Percentage(25),
-    ]).split(outer[1]);
+    ]).split(outer[2]);
 
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
@@ -1663,12 +1857,12 @@ fn draw_running_full_stress(frame: &mut Frame, state: &DashboardState) {
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
         Constraint::Percentage(25),
-    ]).split(outer[2]);
+    ]).split(outer[3]);
 
     draw_bandwidth_sparklines(frame, state, sparkline_panels[0]);
     draw_latency_sparkline(frame, state, sparkline_panels[1]);
 
-    draw_pass_history(frame, state, outer[3]);
+    draw_pass_history(frame, state, outer[4]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,9 +1924,23 @@ fn write_log_content(
     writeln!(w, "Date:       {display_ts}")?;
     writeln!(w, "Mode:       {}", mode.label())?;
     writeln!(w, "Chip:       {}", ds.chip_name)?;
+    if ds.gpu_cores > 0 {
+        writeln!(w, "GPU:        {} cores ({})", ds.gpu_cores, ds.metal_version)?;
+    }
     writeln!(w, "Size:       {size_mb} MB")?;
     writeln!(w, "Threads:    {}", ds.num_threads)?;
+    if !ds.os_version.is_empty() {
+        writeln!(w, "macOS:      {}", ds.os_version)?;
+    }
     writeln!(w, "Elapsed:    {}", format_duration(ds.start.elapsed()))?;
+    writeln!(w, "Thermal:    {}", ds.dynamic.thermal_state.label())?;
+    writeln!(w, "RAM usage:  {:.1}/{:.0} GB", ds.dynamic.memory_used_gb, ds.dynamic.memory_total_gb)?;
+    if let Some(pct) = ds.dynamic.battery_percent {
+        let status = if ds.dynamic.battery_charging == Some(true) { " (charging)" }
+            else if ds.dynamic.battery_on_ac == Some(true) { " (AC)" }
+            else { " (battery)" };
+        writeln!(w, "Battery:    {}%{}", pct, status)?;
+    }
 
     // Memory benchmarks
     if ds.seq_write_gbps.is_some() {

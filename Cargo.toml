@@ -1,18 +1,26 @@
+[workspace]
+members = [
+    "crates/bench-core",
+    "crates/mem-bench",
+    "crates/cpu-bench",
+    "crates/gpu-bench",
+    "crates/sysinfo",
+]
+resolver = "3"
+
 [package]
 name = "mac-benchmark"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bench-core = { path = "crates/bench-core" }
+mem-bench = { path = "crates/mem-bench" }
+cpu-bench = { path = "crates/cpu-bench" }
+mac-sysinfo = { path = "crates/sysinfo" }
 ratatui = "0.30"
 crossterm = "0.29"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSError", "NSString"] }
-objc2-metal = { version = "0.3", features = [
-    "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer",
-    "MTLComputeCommandEncoder", "MTLComputePipeline",
-    "MTLLibrary", "MTLBuffer", "MTLResource", "MTLTypes",
-] }
+gpu-bench = { path = "crates/gpu-bench" }

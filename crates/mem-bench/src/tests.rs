@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::helpers::{vol_read, vol_write, xorshift64, TestError, RUNNING};
+use bench_core::{vol_read, vol_write, xorshift64, TestError, RUNNING};
 
 pub fn pattern_test(region: &mut [u64], pattern: u64) -> Result<(), TestError> {
     for elem in region.iter_mut() {

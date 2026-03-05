@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use crate::helpers::xorshift64;
+use bench_core::xorshift64;
 
 pub const CPU_BENCH_PASSES: u32 = 5;
 pub const CPU_BENCH_ITERS: u64 = 100_000_000;
@@ -71,9 +71,6 @@ pub fn bench_int_independent() -> f64 {
         best = best.min(start.elapsed().as_secs_f64());
     }
 
-    // Total ops = 4 chains * (iters) * 2 ops (mul+add) per iter...
-    // but we report as "operations" where one op = mul+add pair per chain step
-    // so total chain steps = CPU_BENCH_ITERS (4 * iters/4)
     CPU_BENCH_ITERS as f64 / best / 1e9
 }
 
@@ -187,7 +184,6 @@ pub fn bench_cache_latency(size_bytes: usize) -> f64 {
         return 0.0;
     }
 
-    // Allocate and build Sattolo shuffle
     let mut arena: Vec<usize> = (0..elem_count).collect();
     let mut rng = 0x12345678u64;
     for i in (1..elem_count).rev() {
@@ -230,7 +226,6 @@ pub fn bench_cache_bandwidth(size_bytes: usize) -> f64 {
     let passes = (CPU_BENCH_PASSES as usize).max(3);
     let mut best = f64::MAX;
 
-    // We want at least ~10M reads to get stable timing
     let reps = (10_000_000usize / elem_count).max(1);
 
     for _ in 0..passes {
@@ -255,8 +250,7 @@ pub fn bench_cache_bandwidth(size_bytes: usize) -> f64 {
 
 const MT_PASSES: u32 = 3;
 
-/// Multi-threaded integer benchmark: spawns `num_threads` threads each running
-/// the 4-chain independent integer workload. Returns aggregate Gops/s.
+/// Multi-threaded integer benchmark. Returns aggregate Gops/s.
 pub fn bench_mt_int(num_threads: u32) -> f64 {
     let mut best = f64::MAX;
     let a: u64 = 6364136223846793005;
@@ -297,8 +291,7 @@ pub fn bench_mt_int(num_threads: u32) -> f64 {
     (CPU_BENCH_ITERS as f64 * num_threads as f64) / best / 1e9
 }
 
-/// Multi-threaded FP64 FMA benchmark: spawns `num_threads` threads each running
-/// the 4-chain independent FP workload. Returns aggregate Gflops/s.
+/// Multi-threaded FP64 FMA benchmark. Returns aggregate Gflops/s.
 pub fn bench_mt_fp(num_threads: u32) -> f64 {
     let mut best = f64::MAX;
     let a: f64 = 1.0000001;
@@ -377,9 +370,6 @@ pub mod neon {
             }
         }
 
-        // 4 chains * iters iterations * 4 lanes = CPU_BENCH_ITERS * 4 total FP ops
-        // but each vfmaq is a fused multiply-add = 1 FMA op per lane
-        // We report total FMA ops (each = 1 op for throughput purposes)
         (iters as f64 * 4.0 * 4.0) / best / 1e9
     }
 

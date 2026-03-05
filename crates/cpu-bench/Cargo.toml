@@ -1,0 +1,8 @@
+[package]
+name = "cpu-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bench-core = { path = "../bench-core" }
+libc = "0.2"

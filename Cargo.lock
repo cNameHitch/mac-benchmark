@@ -45,6 +45,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bench-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -143,6 +150,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
 dependencies = [
  "unicode-segmentation",
+]
+
+[[package]]
+name = "cpu-bench"
+version = "0.1.0"
+dependencies = [
+ "bench-core",
+ "libc",
 ]
 
 [[package]]
@@ -419,6 +434,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-bench"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,13 +629,19 @@ dependencies = [
 name = "mac-benchmark"
 version = "0.1.0"
 dependencies = [
+ "bench-core",
+ "cpu-bench",
  "crossterm",
+ "gpu-bench",
  "libc",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
+ "mac-sysinfo",
+ "mem-bench",
  "ratatui",
 ]
+
+[[package]]
+name = "mac-sysinfo"
+version = "0.1.0"
 
 [[package]]
 name = "mac_address"
@@ -621,6 +651,13 @@ checksum = "c0aeb26bf5e836cc1c341c8106051b573f1766dfa05aa87f0b98be5e51b02303"
 dependencies = [
  "nix",
  "winapi",
+]
+
+[[package]]
+name = "mem-bench"
+version = "0.1.0"
+dependencies = [
+ "bench-core",
 ]
 
 [[package]]
