@@ -65,7 +65,8 @@ fn parse_config() -> (Option<InternalMode>, usize, Option<u64>, Option<u32>) {
         eprintln!("  --cpu              Run CPU benchmarks + cache hierarchy profiling");
         eprintln!("  --mt-cpu           Run multi-threaded CPU benchmarks (all cores)");
         eprintln!("  --gpu              Run GPU benchmarks (Metal compute)");
-        eprintln!("  --all              Run tests + memory benchmarks + CPU + GPU benchmarks");
+        eprintln!("  --ane              Run ANE/AMX benchmarks (LLM matrix ops via Accelerate)");
+        eprintln!("  --all              Run memory + CPU + GPU + ANE benchmarks");
         eprintln!("  --stress           Continuous correctness stress test");
         eprintln!("  --full-stress      Full stress: correctness + all benchmarks each cycle");
         eprintln!("  --dashboard        Alias for --full-stress (interactive TUI)");
@@ -89,6 +90,7 @@ fn parse_config() -> (Option<InternalMode>, usize, Option<u64>, Option<u32>) {
             "--cpu" => mode = Some(InternalMode::Run(RunMode::Cpu)),
             "--mt-cpu" => mode = Some(InternalMode::Run(RunMode::MtCpu)),
             "--gpu" => mode = Some(InternalMode::Run(RunMode::Gpu)),
+            "--ane" => mode = Some(InternalMode::Run(RunMode::Ane)),
             "--all" | "-a" => mode = Some(InternalMode::Run(RunMode::All)),
             "--stress" | "-s" => mode = Some(InternalMode::Run(RunMode::Stress)),
             "--full-stress" | "-F" | "--dashboard" => mode = Some(InternalMode::Run(RunMode::FullStress)),
