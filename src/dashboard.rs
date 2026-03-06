@@ -26,18 +26,20 @@ pub enum RunMode {
     Cpu,
     MtCpu,
     Gpu,
+    Ane,
     All,
     Stress,
     FullStress,
 }
 
 impl RunMode {
-    const ALL_MODES: [RunMode; 8] = [
+    const ALL_MODES: [RunMode; 9] = [
         RunMode::Test,
         RunMode::Bench,
         RunMode::Cpu,
         RunMode::MtCpu,
         RunMode::Gpu,
+        RunMode::Ane,
         RunMode::All,
         RunMode::Stress,
         RunMode::FullStress,
@@ -50,6 +52,7 @@ impl RunMode {
             RunMode::Cpu => "CPU",
             RunMode::MtCpu => "MT CPU",
             RunMode::Gpu => "GPU",
+            RunMode::Ane => "ANE",
             RunMode::All => "All",
             RunMode::Stress => "Stress",
             RunMode::FullStress => "Full Stress",
@@ -63,7 +66,8 @@ impl RunMode {
             RunMode::Cpu => "Continuous CPU throughput + cache hierarchy profiling",
             RunMode::MtCpu => "Multi-threaded CPU benchmark (saturates all cores)",
             RunMode::Gpu => "GPU compute throughput, memory bandwidth, and matrix multiply (Metal)",
-            RunMode::All => "Continuous tests + memory + CPU + GPU benchmarks",
+            RunMode::Ane => "ANE/AMX LLM matrix ops (SGEMM, GEMV, token estimate via Accelerate)",
+            RunMode::All => "Continuous memory + CPU + GPU + ANE benchmarks",
             RunMode::Stress => "Continuous correctness stress test",
             RunMode::FullStress => "Full stress: tests + all benchmarks every cycle",
         }
@@ -214,6 +218,10 @@ enum BenchMetric {
     GpuBufWrite(f64),
     GpuBufAlloc(f64),
     GpuMatmul(f64),
+    AneSgemm(f64),
+    AneGemv(f64),
+    AnePrefill(f64),
+    AneTokenEst(f64),
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +308,10 @@ struct FullStressStats {
     gpu_buf_write: MetricStats,
     gpu_buf_alloc: MetricStats,
     gpu_matmul: MetricStats,
+    ane_sgemm: MetricStats,
+    ane_gemv: MetricStats,
+    ane_prefill: MetricStats,
+    ane_token_est: MetricStats,
     total_passed: u64,
     total_failed: u64,
 }
@@ -355,6 +367,10 @@ impl FullStressStats {
             gpu_buf_write: MetricStats::new(true),
             gpu_buf_alloc: MetricStats::new(false), // lower is better
             gpu_matmul: MetricStats::new(true),
+            ane_sgemm: MetricStats::new(true),
+            ane_gemv: MetricStats::new(true),
+            ane_prefill: MetricStats::new(true),
+            ane_token_est: MetricStats::new(true),
             total_passed: 0,
             total_failed: 0,
         }
@@ -417,6 +433,13 @@ struct DashboardState {
     gpu_matmul_tflops: Option<f64>,
     gpu_status: Option<String>,
 
+    // ANE/AMX bench results
+    ane_sgemm_tflops: Option<f64>,
+    ane_gemv_gflops: Option<f64>,
+    ane_prefill_tflops: Option<f64>,
+    ane_token_est: Option<f64>,
+    ane_status: Option<String>,
+
     // Sparkline history - bandwidth
     write_history: Vec<u64>,
     read_history: Vec<u64>,
@@ -446,6 +469,10 @@ struct DashboardState {
     gpu_fp16_history: Vec<u64>,
     gpu_buf_read_history: Vec<u64>,
     gpu_matmul_history: Vec<u64>,
+
+    // Sparkline history - ANE/AMX
+    ane_sgemm_history: Vec<u64>,
+    ane_token_history: Vec<u64>,
 
     // Stress state
     stress_pass: u64,
@@ -518,6 +545,11 @@ impl DashboardState {
             gpu_buf_alloc_us: None,
             gpu_matmul_tflops: None,
             gpu_status: None,
+            ane_sgemm_tflops: None,
+            ane_gemv_gflops: None,
+            ane_prefill_tflops: None,
+            ane_token_est: None,
+            ane_status: None,
             write_history: Vec::new(),
             read_history: Vec::new(),
             copy_history: Vec::new(),
@@ -542,6 +574,8 @@ impl DashboardState {
             gpu_fp16_history: Vec::new(),
             gpu_buf_read_history: Vec::new(),
             gpu_matmul_history: Vec::new(),
+            ane_sgemm_history: Vec::new(),
+            ane_token_history: Vec::new(),
             stress_pass: 0,
             stress_total_passed: 0,
             stress_total_failed: 0,
@@ -733,6 +767,24 @@ impl DashboardState {
                         self.gpu_matmul_tflops = Some(v);
                         push_sparkline(&mut self.gpu_matmul_history, v);
                         if let Some(ref mut s) = self.metric_stats { s.gpu_matmul.record(v); }
+                    }
+                    BenchMetric::AneSgemm(v) => {
+                        self.ane_sgemm_tflops = Some(v);
+                        push_sparkline(&mut self.ane_sgemm_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.ane_sgemm.record(v); }
+                    }
+                    BenchMetric::AneGemv(v) => {
+                        self.ane_gemv_gflops = Some(v);
+                        if let Some(ref mut s) = self.metric_stats { s.ane_gemv.record(v); }
+                    }
+                    BenchMetric::AnePrefill(v) => {
+                        self.ane_prefill_tflops = Some(v);
+                        if let Some(ref mut s) = self.metric_stats { s.ane_prefill.record(v); }
+                    }
+                    BenchMetric::AneTokenEst(v) => {
+                        self.ane_token_est = Some(v);
+                        push_sparkline(&mut self.ane_token_history, v);
+                        if let Some(ref mut s) = self.metric_stats { s.ane_token_est.record(v); }
                     }
                 }
             }
@@ -984,6 +1036,25 @@ fn worker_run_gpu_bench(tx: &mpsc::Sender<WorkerMsg>) {
     let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::GpuMatmul(v)));
 }
 
+#[cfg(target_os = "macos")]
+fn worker_run_ane_bench(tx: &mpsc::Sender<WorkerMsg>) {
+    if !is_running() { return; }
+    let v = ane_bench::bench_sgemm();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::AneSgemm(v)));
+
+    if !is_running() { return; }
+    let v = ane_bench::bench_gemv();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::AneGemv(v)));
+
+    if !is_running() { return; }
+    let v = ane_bench::bench_prefill();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::AnePrefill(v)));
+
+    if !is_running() { return; }
+    let v = ane_bench::estimate_token_throughput();
+    let _ = tx.send(WorkerMsg::BenchResult(BenchMetric::AneTokenEst(v)));
+}
+
 fn worker_run_stress_loop(region: &mut [u64], tx: &mpsc::Sender<WorkerMsg>) {
     let mut pass_num = 0u64;
     while is_running() {
@@ -1020,6 +1091,10 @@ fn worker_run_full_stress_loop(region: &mut [u64], size_mb: usize, num_threads: 
 
         #[cfg(target_os = "macos")]
         worker_run_gpu_bench(tx);
+        if !is_running() { break; }
+
+        #[cfg(target_os = "macos")]
+        worker_run_ane_bench(tx);
         if !is_running() { break; }
     }
 }
@@ -1069,19 +1144,16 @@ fn worker_loop(mode: RunMode, mut region: Vec<u64>, size_mb: usize, num_threads:
                 if !is_running() { break; }
             }
         }
-        RunMode::All => {
-            // Loop: tests → StressPassResult → mem bench → cpu bench
-            let mut pass_num = 0u64;
+        RunMode::Ane => {
             while is_running() {
-                pass_num += 1;
-                let _ = tx.send(WorkerMsg::StressTestProgress("Running tests...".to_string()));
-                let pass_start = Instant::now();
-                let (passed, failed, errors) = run_test_pass(&mut region);
+                #[cfg(target_os = "macos")]
+                worker_run_ane_bench(&tx);
                 if !is_running() { break; }
-                let _ = tx.send(WorkerMsg::StressPassResult {
-                    pass_num, passed, failed, errors, duration: pass_start.elapsed(),
-                });
-
+            }
+        }
+        RunMode::All => {
+            // Loop: mem bench → cpu bench → gpu bench → ane bench
+            while is_running() {
                 worker_run_mem_bench(&mut region, num_threads, &tx);
                 if !is_running() { break; }
 
@@ -1090,6 +1162,10 @@ fn worker_loop(mode: RunMode, mut region: Vec<u64>, size_mb: usize, num_threads:
 
                 #[cfg(target_os = "macos")]
                 worker_run_gpu_bench(&tx);
+                if !is_running() { break; }
+
+                #[cfg(target_os = "macos")]
+                worker_run_ane_bench(&tx);
                 if !is_running() { break; }
             }
         }
@@ -1663,6 +1739,7 @@ fn draw_running(frame: &mut Frame, state: &DashboardState) {
         RunMode::Cpu => draw_running_cpu(frame, state),
         RunMode::MtCpu => draw_running_mt_cpu(frame, state),
         RunMode::Gpu => draw_running_gpu(frame, state),
+        RunMode::Ane => draw_running_ane(frame, state),
         RunMode::All => draw_running_all(frame, state),
         RunMode::Stress => draw_running_stress(frame, state),
         RunMode::FullStress => draw_running_full_stress(frame, state),
@@ -1775,7 +1852,20 @@ fn draw_running_gpu(frame: &mut Frame, state: &DashboardState) {
     draw_gpu_sparklines(frame, state, outer[3]);
 }
 
-// All: title + panels (stress/bench/cpu/gpu) + bandwidth sparklines + pass history
+fn draw_running_ane(frame: &mut Frame, state: &DashboardState) {
+    let area = frame.area();
+    let outer = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(5),
+    ]).split(area);
+
+    running_title_bar(frame, state, outer[0]);
+    draw_system_bar(frame, state, outer[1]);
+    draw_ane_panel(frame, state, outer[2]);
+}
+
+// All: title + panels (stress/bench/cpu/gpu/ane) + bandwidth sparklines + pass history
 fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
     let area = frame.area();
 
@@ -1784,7 +1874,6 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
         Constraint::Length(3),  // system bar
         Constraint::Min(12),   // panels
         Constraint::Length(7), // sparklines
-        Constraint::Min(6),    // pass history
     ]).split(area);
 
     running_title_bar(frame, state, outer[0]);
@@ -1800,7 +1889,7 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
     draw_gpu_panel(frame, state, top_panels[2]);
-    draw_stress_panel(frame, state, top_panels[3]);
+    draw_ane_panel(frame, state, top_panels[3]);
 
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
@@ -1809,8 +1898,6 @@ fn draw_running_all(frame: &mut Frame, state: &DashboardState) {
 
     draw_bandwidth_sparklines(frame, state, sparkline_panels[0]);
     draw_latency_sparkline(frame, state, sparkline_panels[1]);
-
-    draw_pass_history(frame, state, outer[4]);
 }
 
 fn draw_running_stress(frame: &mut Frame, state: &DashboardState) {
@@ -1843,16 +1930,18 @@ fn draw_running_full_stress(frame: &mut Frame, state: &DashboardState) {
     draw_system_bar(frame, state, outer[1]);
 
     let top_panels = Layout::horizontal([
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
     ]).split(outer[2]);
 
     draw_bench_panel(frame, state, top_panels[0]);
     draw_cpu_panel(frame, state, top_panels[1]);
     draw_gpu_panel(frame, state, top_panels[2]);
-    draw_stress_panel(frame, state, top_panels[3]);
+    draw_ane_panel(frame, state, top_panels[3]);
+    draw_stress_panel(frame, state, top_panels[4]);
 
     let sparkline_panels = Layout::horizontal([
         Constraint::Percentage(75),
@@ -2010,6 +2099,16 @@ fn write_log_content(
         if let Some(v) = ds.gpu_matmul_tflops { writeln!(w, "MatMul:          {v:.3} Tflops/s")?; }
     }
 
+    // ANE/AMX benchmarks
+    if ds.ane_sgemm_tflops.is_some() {
+        writeln!(w)?;
+        writeln!(w, "--- ANE/AMX Benchmarks (Accelerate) ---")?;
+        if let Some(v) = ds.ane_sgemm_tflops   { writeln!(w, "SGEMM 4096:      {v:.3} Tflops/s")?; }
+        if let Some(v) = ds.ane_gemv_gflops     { writeln!(w, "GEMV 4096:       {v:.2} Gflops/s")?; }
+        if let Some(v) = ds.ane_prefill_tflops  { writeln!(w, "Prefill 512x4K:  {v:.3} Tflops/s")?; }
+        if let Some(v) = ds.ane_token_est       { writeln!(w, "~7B tok/s:       {v:.1} tok/s")?; }
+    }
+
     // Stress test
     if ds.stress_pass > 0 {
         writeln!(w)?;
@@ -2072,6 +2171,10 @@ fn write_log_content(
             stat_line(w, "GPU buffer write", "GB/s", &stats.gpu_buf_write)?;
             stat_line(w, "GPU buffer alloc", "us", &stats.gpu_buf_alloc)?;
             stat_line(w, "GPU matmul", "Tflops/s", &stats.gpu_matmul)?;
+            stat_line(w, "ANE SGEMM 4096", "Tflops/s", &stats.ane_sgemm)?;
+            stat_line(w, "ANE GEMV 4096", "Gflops/s", &stats.ane_gemv)?;
+            stat_line(w, "ANE Prefill 512x4K", "Tflops/s", &stats.ane_prefill)?;
+            stat_line(w, "ANE ~7B token throughput", "tok/s", &stats.ane_token_est)?;
         }
     }
 
@@ -2462,7 +2565,7 @@ fn draw_summary(frame: &mut Frame, ss: &SummaryState) {
 // ---------------------------------------------------------------------------
 
 fn draw_bench_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
-    let border_style = Style::default().fg(Color::Yellow);
+    let border_style = Style::default().fg(Color::Blue);
     let scroll = state.scroll_offset;
 
     let mut lines = Vec::new();
@@ -2555,7 +2658,7 @@ fn draw_cpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
 }
 
 fn draw_cpu_panel_inner(frame: &mut Frame, state: &DashboardState, area: Rect, scroll: u16) {
-    let border_style = Style::default().fg(Color::Yellow);
+    let border_style = Style::default().fg(Color::Green);
 
     let mut lines = Vec::new();
     let val_style = Style::default().fg(Color::Cyan);
@@ -2710,7 +2813,7 @@ fn draw_cpu_panel_inner(frame: &mut Frame, state: &DashboardState, area: Rect, s
 }
 
 fn draw_gpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
-    let border_style = Style::default().fg(Color::Yellow);
+    let border_style = Style::default().fg(Color::Red);
     let scroll = state.scroll_offset;
 
     let mut lines = Vec::new();
@@ -2800,10 +2903,68 @@ fn draw_gpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_ane_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
+    let border_style = Style::default().fg(Color::Magenta);
+
+    let mut lines = Vec::new();
+    let val_style = Style::default().fg(Color::Cyan);
+    let hdr_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let tok_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+
+    if let Some(ref msg) = state.ane_status {
+        lines.push(Line::styled(format!("  {}", msg), Style::default().fg(Color::Red)));
+    }
+
+    if state.ane_sgemm_tflops.is_some() || state.ane_prefill_tflops.is_some() {
+        lines.push(Line::from(Span::styled("  MatMul (AMX):", hdr_style)));
+        if let Some(v) = state.ane_sgemm_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    SGEMM:  "),
+                Span::styled(format!("{:>8.3} Tflops", v), val_style),
+            ]));
+        }
+        if let Some(v) = state.ane_prefill_tflops {
+            lines.push(Line::from(vec![
+                Span::raw("    Prefill:"),
+                Span::styled(format!("{:>8.3} Tflops", v), val_style),
+            ]));
+        }
+    }
+
+    if let Some(v) = state.ane_gemv_gflops {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("  Decode:", hdr_style)));
+        lines.push(Line::from(vec![
+            Span::raw("    GEMV:   "),
+            Span::styled(format!("{:>8.2} Gflops", v), val_style),
+        ]));
+    }
+
+    if let Some(v) = state.ane_token_est {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("  LLM Estimate:", hdr_style)));
+        lines.push(Line::from(vec![
+            Span::raw("    ~7B:    "),
+            Span::styled(format!("{:>8.1} tok/s", v), tok_style),
+        ]));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::styled("  Waiting for results...", Style::default().fg(Color::DarkGray)));
+    }
+
+    let block = Block::bordered()
+        .title(" ANE/AMX BENCH ")
+        .border_style(border_style);
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_gpu_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(" GPU THROUGHPUT HISTORY ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Red));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2842,7 +3003,7 @@ fn draw_gpu_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
 fn draw_mt_cpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(format!(" MT CPU BENCH ({} threads) ", state.num_threads))
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Green));
 
     let mut lines = Vec::new();
     let val_style = Style::default().fg(Color::Cyan);
@@ -2871,7 +3032,7 @@ fn draw_mt_cpu_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
 fn draw_mt_cpu_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(" MT CPU THROUGHPUT HISTORY ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Green));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2958,7 +3119,7 @@ fn draw_stress_panel(frame: &mut Frame, state: &DashboardState, area: Rect) {
 fn draw_bandwidth_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(" BANDWIDTH HISTORY (GB/s) ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -3016,7 +3177,7 @@ fn draw_bandwidth_sparklines(frame: &mut Frame, state: &DashboardState, area: Re
 fn draw_latency_sparkline(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(" LATENCY (ns) ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Blue));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -3033,7 +3194,7 @@ fn draw_latency_sparkline(frame: &mut Frame, state: &DashboardState, area: Rect)
 fn draw_cpu_sparklines(frame: &mut Frame, state: &DashboardState, area: Rect) {
     let block = Block::bordered()
         .title(" CPU THROUGHPUT HISTORY ")
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(Color::Green));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -4,6 +4,7 @@ members = [
     "crates/mem-bench",
     "crates/cpu-bench",
     "crates/gpu-bench",
+    "crates/ane-bench",
     "crates/sysinfo",
 ]
 resolver = "3"
@@ -24,3 +25,4 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpu-bench = { path = "crates/gpu-bench" }
+ane-bench = { path = "crates/ane-bench" }
